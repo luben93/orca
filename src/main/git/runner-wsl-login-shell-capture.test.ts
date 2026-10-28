@@ -90,6 +90,38 @@ describe('WSL login-shell reads are fenced', () => {
     expect(Buffer.compare(stdout, binary)).toBe(0)
   })
 
+  function respondWithFencedText(payload: string, error: Error | null = null): void {
+    execFileMock.mockImplementation((_command, args, _options, callback) => {
+      const nonce = /__ORCA_WSL_CAPTURE_BEGIN_ ([^_]+)__/.exec(String(args.at(-1)))?.[1] ?? ''
+      const stdout = `${BANNER}__ORCA_WSL_CAPTURE_BEGIN_${nonce}__${payload}__ORCA_WSL_CAPTURE_END_${nonce}__`
+      queueMicrotask(() => callback?.(error, stdout, ''))
+      return createMockChild()
+    })
+  }
+
+  it('fences buffered text reads without a per-call opt-in', async () => {
+    respondWithFencedText('3\t1\ta.txt\0')
+
+    const { stdout } = await gitExecFileAsync(['diff', '--numstat', '-z'], {
+      cwd: WSL_CWD,
+      wslDistro: DISTRO
+    })
+
+    expect(stdout).toBe('3\t1\ta.txt\0')
+  })
+
+  it('strips the fence from stdout of a non-zero exit', async () => {
+    respondWithFencedText('ignored.log\0', Object.assign(new Error('exit 1'), { code: 1 }))
+
+    const failure = await gitExecFileAsync(['check-ignore', '-z', '--stdin'], {
+      cwd: WSL_CWD,
+      wslDistro: DISTRO,
+      stdin: 'ignored.log\0'
+    }).catch((error: unknown) => error)
+
+    expect(failure).toMatchObject({ code: 1, stdout: 'ignored.log\0' })
+  })
+
   /** Answer the core.sshCommand probe with `configured`, and any other command with ok. */
   function respondToSshPolicyProbe(configured: string): void {
     execFileMock.mockImplementation((_command, args, _options, callback) => {

@@ -49,7 +49,9 @@ async function gitExecFileAsyncUnlocked(
       if (readEnvironmentReady) {
         await readEnvironmentReady
       }
-      let resolved = resolveGitCommand(args, options, false, options.captureWslLoginShellOutput)
+      // Buffered reads fence login rc output by default; only streaming (gitStreamStdout) must stay unfenced.
+      const captureLoginShellOutput = options.captureWslLoginShellOutput ?? true
+      let resolved = resolveGitCommand(args, options, false, captureLoginShellOutput)
       const environmentReady = prepareWindowsHostGitEnvironment(
         resolved,
         options.env,
@@ -57,12 +59,7 @@ async function gitExecFileAsyncUnlocked(
       )
       const env = environmentReady ? await environmentReady : options.env
       const effectiveOptions = env === options.env ? options : { ...options, env }
-      resolved = resolveGitCommand(
-        args,
-        effectiveOptions,
-        false,
-        effectiveOptions.captureWslLoginShellOutput
-      )
+      resolved = resolveGitCommand(args, effectiveOptions, false, captureLoginShellOutput)
       const policy =
         effectiveOptions.useConfiguredSshCommandForNetwork || classifyGitCommand(args) === 'network'
           ? await buildNetworkSshPolicyEnv(effectiveOptions, args)
@@ -114,7 +111,7 @@ async function gitExecFileAsyncUnlocked(
           : execFileCapture(command.binary, command.args, captureOptions)
         // Add a cause when a dead WSL distro returns empty stderr.
         return captured.catch((error: unknown) => {
-          throw annotateWslHostFailure(error, command)
+          throw withCapturedErrorStdout(annotateWslHostFailure(error, command), command)
         })
       }
       const runCapturedCommand = async (): Promise<{ stdout: string; stderr: string }> => {
@@ -135,7 +132,7 @@ async function gitExecFileAsyncUnlocked(
               args,
               effectiveOptions,
               true,
-              effectiveOptions.captureWslLoginShellOutput
+              captureLoginShellOutput
             )
             result = await capture(fallback)
             // Why: matching failures can be normal Git control flow; only a successful login retry proves the direct environment was insufficient.
@@ -173,6 +170,16 @@ async function gitExecFileAsyncUnlocked(
       }
     }
   )
+}
+
+/** Callers parse stdout of non-zero exits (check-ignore exit 1), so strip the fence there too. */
+function withCapturedErrorStdout(error: unknown, command: ResolvedCommand): unknown {
+  if (command.captured && error && typeof error === 'object' && 'stdout' in error) {
+    if (typeof error.stdout === 'string') {
+      error.stdout = readCapturedGitString(error.stdout, command)
+    }
+  }
+  return error
 }
 
 export function gitExecFileAsync(
