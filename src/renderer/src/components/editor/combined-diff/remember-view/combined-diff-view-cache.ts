@@ -1,5 +1,4 @@
 import type { VirtualizedScrollAnchor } from '@/hooks/useVirtualizedScrollAnchor'
-import { setWithLRU } from '@/lib/scroll-cache'
 import type { DiffSection } from '../../diff-section-types'
 
 export type CachedCombinedDiffViewState = {
@@ -38,6 +37,8 @@ export type CombinedDiffViewLease = {
   revoked: boolean
 }
 
+// Drafts and mounted views are pinned, so the cache may exceed this while they are held.
+const MAX_CACHED_COMBINED_DIFF_VIEWS = 20
 const memoryByViewKey = new Map<string, CombinedDiffViewMemory>()
 const mountedLeases = new Set<CombinedDiffViewLease>()
 
@@ -48,6 +49,31 @@ function isMountedViewKey(viewKey: string): boolean {
     }
   }
   return false
+}
+
+// Unsaved section edits live only here once their tab unmounts, so evicting them loses user work.
+function canEvictCombinedDiffView(viewKey: string, memory: CombinedDiffViewMemory): boolean {
+  if (memory.view?.sections.some((section) => section.dirty || section.saveConflict)) {
+    return false
+  }
+  return !isMountedViewKey(viewKey)
+}
+
+function evictOldestReloadableViews(): void {
+  for (const [viewKey, memory] of memoryByViewKey) {
+    if (memoryByViewKey.size <= MAX_CACHED_COMBINED_DIFF_VIEWS) {
+      return
+    }
+    if (canEvictCombinedDiffView(viewKey, memory)) {
+      memoryByViewKey.delete(viewKey)
+    }
+  }
+}
+
+function writeViewMemory(viewKey: string, memory: CombinedDiffViewMemory): void {
+  memoryByViewKey.delete(viewKey)
+  memoryByViewKey.set(viewKey, memory)
+  evictOldestReloadableViews()
 }
 
 // Fresh tab IDs inherit only closed predecessors; inactive open tabs are unmounted too and must retain their own views.
@@ -96,6 +122,13 @@ export function claimCombinedDiffView(
     memoryByViewKey.delete(viewKey)
   }
   const tag = succession ? { contentKey: succession.contentKey, scopeId: succession.scopeId } : null
+  const lease: CombinedDiffViewLease = {
+    viewKey,
+    ...(tag ? { succession: tag } : {}),
+    worktreeId,
+    revoked: false
+  }
+  mountedLeases.add(lease)
   if (succession && tag && !memoryByViewKey.has(viewKey)) {
     const inheritableKeys = findInheritableViewKeys(viewKey, worktreeId, succession)
     const inherited = memoryByViewKey.get(inheritableKeys.at(-1) ?? '')
@@ -104,22 +137,16 @@ export function claimCombinedDiffView(
       memoryByViewKey.delete(key)
     }
     if (inherited) {
-      setWithLRU(memoryByViewKey, viewKey, { ...inherited, succession: tag })
+      writeViewMemory(viewKey, { ...inherited, succession: tag })
     }
   }
-  const lease: CombinedDiffViewLease = {
-    viewKey,
-    ...(tag ? { succession: tag } : {}),
-    worktreeId,
-    revoked: false
-  }
-  mountedLeases.add(lease)
   return lease
 }
 
 // Release mount tracking only; the unmount snapshot still needs this lease to write.
 export function releaseCombinedDiffView(lease: CombinedDiffViewLease): void {
   mountedLeases.delete(lease)
+  evictOldestReloadableViews()
 }
 
 export function rememberCombinedDiffView(
@@ -131,7 +158,7 @@ export function rememberCombinedDiffView(
   }
   const memory = memoryByViewKey.get(lease.viewKey)
   const owned = memory?.worktreeId === lease.worktreeId ? memory : { worktreeId: lease.worktreeId }
-  setWithLRU(memoryByViewKey, lease.viewKey, {
+  writeViewMemory(lease.viewKey, {
     ...owned,
     ...patch,
     ...(lease.succession ? { succession: lease.succession } : {})
