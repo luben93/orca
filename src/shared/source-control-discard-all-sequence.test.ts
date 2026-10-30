@@ -17,6 +17,17 @@ function entry(partial: Partial<GitStatusEntry> & { path: string }): GitStatusEn
 }
 
 describe('getDiscardAllPaths', () => {
+  it('skips present submodules and their children but keeps deleted submodules', () => {
+    const submodule = { commitChanged: false, trackedChanges: true, untrackedChanges: false }
+    const entries: GitStatusEntry[] = [
+      entry({ path: 'dirty-sub', submodule }),
+      entry({ path: 'dirty-sub/file.ts', submoduleRoot: 'dirty-sub' }),
+      entry({ path: 'deleted-sub', status: 'deleted', submodule }),
+      entry({ path: 'parent.ts' })
+    ]
+    expect(getDiscardAllPaths(entries, 'unstaged')).toEqual(['deleted-sub', 'parent.ts'])
+  })
+
   it('skips entries with an unresolved conflict', () => {
     const entries: GitStatusEntry[] = [
       entry({ path: 'clean.ts', area: 'unstaged' }),
